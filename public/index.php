@@ -1,0 +1,753 @@
+<?php
+declare(strict_types=1);
+
+require __DIR__ . '/../app/bootstrap.php';
+require __DIR__ . '/../app/Services/VpnLinks.php';
+require __DIR__ . '/../app/Services/XrayProvision.php';
+require_once __DIR__ . '/../app/Services/PlanService.php';
+require_once __DIR__ . '/../app/Services/PaymentService.php';
+require_once __DIR__ . '/../app/Services/SubscriptionService.php';
+require_once __DIR__ . '/../app/Services/BalanceService.php';
+require_once __DIR__ . '/../app/Services/PasswordResetService.php';
+
+init_db();
+$path = parse_url($_SERVER['REQUEST_URI'], PHP_URL_PATH) ?: '/';
+$method = $_SERVER['REQUEST_METHOD'];
+
+try {
+    if (str_starts_with($path, '/r/')) {
+        $code = strtoupper(trim(substr($path, 3)));
+        if ($code !== '') $_SESSION['ref_code'] = $code;
+        flash('Реферальная ссылка сохранена. Зарегистрируйтесь, чтобы подключить MagicVPN.', 'success');
+        redirect('/register');
+    }
+
+    if ($path === '/') { view('home'); return; }
+
+    if ($path === '/terms') { view('legal/terms'); return; }
+
+    if ($path === '/sub') {
+        $token = trim((string)($_GET['token'] ?? ''));
+        if ($token === '') { http_response_code(404); exit('Not found'); }
+        $stmt = db()->prepare("SELECT * FROM subscriptions WHERE sub_token=? AND server_id='global' AND active=1 AND expires_at > UTC_TIMESTAMP() LIMIT 1");
+        $stmt->execute([$token]);
+        $sub = $stmt->fetch();
+        if (!$sub) { http_response_code(404); exit('Subscription not found or expired'); }
+        $links = build_all_vless_links($sub['uuid']);
+        $payload = implode("\n", array_map(fn($l) => $l['link'], $links));
+        header('Content-Type: text/plain; charset=utf-8');
+        echo base64_encode($payload);
+        return;
+    }
+
+    if ($path === '/status') {
+        $statuses = check_all_xray_statuses();
+        view('status', compact('statuses')); return;
+    }
+
+    if ($path === '/trial' && $method === 'POST') {
+        $u = require_login(); check_csrf();
+        $trial = create_or_extend_trial($u);
+        create_job('provision_user', ['user_id'=>(int)$u['id'], 'uuid'=>$trial['uuid'], 'xray_email'=>'web_' . $u['id']], 5);
+        admin_log('trial_created', (int)$u['id'], ['queued'=>true, 'days'=>$trial['days']]);
+        send_magic_email((int)$u['id'], $u['email'], 'MagicVPN: тестовый доступ активирован', "Ваш тестовый доступ активирован до {$trial['expires_at']} UTC.
+
+Откройте личный кабинет и скопируйте subscription-ссылку.");
+        flash('Тестовый доступ активирован. Выдача ключа поставлена в очередь и обычно занимает до 1 минуты.', 'success');
+        redirect('/dashboard');
+    }
+
+    if ($path === '/register' && $method === 'GET') { $captcha = captcha_enabled() ? captcha_current() : null; $emailVerifyEnabled = email_verification_enabled(); view('auth/register', compact('captcha','emailVerifyEnabled')); return; }
+    if ($path === '/register' && $method === 'POST') {
+        check_csrf();
+        if (!captcha_check()) {
+            captcha_generate();
+            flash('Проверка Google reCAPTCHA не пройдена. Попробуйте ещё раз.', 'danger');
+            redirect('/register');
+        }
+        $email = strtolower(trim($_POST['email'] ?? ''));
+        $pass = (string)($_POST['password'] ?? '');
+        $name = trim($_POST['name'] ?? '');
+        if (!$email || strlen($pass) < 8) throw new RuntimeException('Проверьте email и пароль.');
+        $verifyEnabled = email_verification_enabled();
+        $stmt = db()->prepare('INSERT INTO users (email,password_hash,name,role,email_verified) VALUES (?,?,?,?,?)');
+        $stmt->execute([$email, password_hash($pass, PASSWORD_DEFAULT), $name, 'user', $verifyEnabled ? 0 : 1]);
+        $userId = (int)db()->lastInsertId();
+        apply_referral_on_registration($userId);
+        if ($verifyEnabled) {
+            $user = ['id' => $userId, 'email' => $email];
+            $sent = send_email_verification($user);
+            flash($sent ? 'Аккаунт создан. Мы отправили письмо для подтверждения Email.' : 'Аккаунт создан, но письмо не отправилось. Обратитесь в поддержку или попробуйте позже.', $sent ? 'success' : 'warning');
+            redirect('/login');
+        }
+        $_SESSION['user_id'] = $userId;
+        redirect('/dashboard');
+    }
+
+    if ($path === '/verify-email') {
+        $token = trim((string)($_GET['token'] ?? ''));
+        if ($token === '') { flash('Некорректная ссылка подтверждения.', 'danger'); redirect('/login'); }
+        $stmt = db()->prepare("SELECT * FROM users WHERE email_verify_token=? AND email_verify_expires_at > UTC_TIMESTAMP() LIMIT 1");
+        $stmt->execute([$token]);
+        $u = $stmt->fetch();
+        if (!$u) { flash('Ссылка подтверждения недействительна или устарела.', 'danger'); redirect('/login'); }
+        db()->prepare('UPDATE users SET email_verified=1, email_verify_token=NULL, email_verify_expires_at=NULL WHERE id=?')->execute([(int)$u['id']]);
+        flash('Email подтверждён. Теперь можно войти.', 'success');
+        redirect('/login');
+    }
+
+    if ($path === '/resend-verification' && $method === 'POST') {
+        check_csrf();
+        $email = strtolower(trim((string)($_POST['email'] ?? '')));
+        $stmt = db()->prepare('SELECT * FROM users WHERE email=? LIMIT 1');
+        $stmt->execute([$email]);
+        $u = $stmt->fetch();
+        if ($u && empty($u['email_verified'])) {
+            send_email_verification($u);
+        }
+        flash('Если аккаунт найден и не подтверждён, мы отправили новое письмо.', 'success');
+        redirect('/login');
+    }
+
+
+    if ($path === '/forgot-password' && $method === 'GET') {
+        view('auth/forgot_password'); return;
+    }
+    if ($path === '/forgot-password' && $method === 'POST') {
+        check_csrf();
+        $email = strtolower(trim((string)($_POST['email'] ?? '')));
+        if ($email !== '' && filter_var($email, FILTER_VALIDATE_EMAIL)) {
+            password_reset_send($email);
+        }
+        flash('Если такой Email зарегистрирован, мы отправили ссылку для восстановления пароля.', 'success');
+        redirect('/login');
+    }
+
+    if ($path === '/reset-password' && $method === 'GET') {
+        $token = trim((string)($_GET['token'] ?? ''));
+        $resetUser = $token !== '' ? password_reset_user_by_token($token) : null;
+        if (!$resetUser) {
+            flash('Ссылка восстановления недействительна или устарела.', 'danger');
+            redirect('/forgot-password');
+        }
+        view('auth/reset_password', compact('token','resetUser')); return;
+    }
+    if ($path === '/reset-password' && $method === 'POST') {
+        check_csrf();
+        $token = trim((string)($_POST['token'] ?? ''));
+        $password = (string)($_POST['password'] ?? '');
+        $password2 = (string)($_POST['password_confirm'] ?? '');
+        if (strlen($password) < 8) {
+            flash('Пароль должен быть не короче 8 символов.', 'danger');
+            redirect('/reset-password?token=' . urlencode($token));
+        }
+        if ($password !== $password2) {
+            flash('Пароли не совпадают.', 'danger');
+            redirect('/reset-password?token=' . urlencode($token));
+        }
+        if (!password_reset_complete($token, $password)) {
+            flash('Ссылка восстановления недействительна или устарела.', 'danger');
+            redirect('/forgot-password');
+        }
+        flash('Пароль изменён. Теперь можно войти.', 'success');
+        redirect('/login');
+    }
+
+    if ($path === '/login' && $method === 'GET') { view('auth/login'); return; }
+    if ($path === '/login' && $method === 'POST') {
+        check_csrf();
+        $email = strtolower(trim($_POST['email'] ?? ''));
+        $ip = $_SERVER['REMOTE_ADDR'] ?? 'unknown';
+        if (login_blocked($email, $ip)) {
+            flash('Слишком много попыток входа. Попробуйте позже.', 'danger'); redirect('/login');
+        }
+        $stmt = db()->prepare('SELECT * FROM users WHERE email = ? LIMIT 1');
+        $stmt->execute([$email]);
+        $u = $stmt->fetch();
+        if (!$u || !password_verify((string)($_POST['password'] ?? ''), $u['password_hash'])) {
+            record_login_attempt($email, $ip, false);
+            flash('Неверный email или пароль.', 'danger'); redirect('/login');
+        }
+        if (email_verification_enabled() && ($u['role'] ?? '') !== 'admin' && empty($u['email_verified'])) {
+            flash('Email не подтверждён. Проверьте почту или отправьте письмо повторно.', 'warning');
+            redirect('/login?verify=1&email=' . urlencode($email));
+        }
+        record_login_attempt($email, $ip, true);
+        $_SESSION['user_id'] = (int)$u['id'];
+        redirect('/dashboard');
+    }
+    if ($path === '/logout') { session_destroy(); redirect('/'); }
+
+    if ($path === '/dashboard') {
+        $u = require_login();
+        $stmt = db()->prepare("SELECT * FROM subscriptions WHERE user_id=? AND server_id='global' ORDER BY expires_at DESC LIMIT 1");
+        $stmt->execute([$u['id']]);
+        $sub = $stmt->fetch() ?: null;
+        $links = $sub ? build_all_vless_links($sub['uuid']) : [];
+        $subUrl = null;
+        if ($sub && !empty($sub['active']) && strtotime($sub['expires_at']) > time()) {
+            $token = ensure_subscription_token($sub);
+            $sub['sub_token'] = $token;
+            $subUrl = base_url() . '/sub?token=' . urlencode($token);
+        }
+        $refLink = referral_link($u);
+        $refCountStmt = db()->prepare('SELECT COUNT(*) FROM users WHERE referred_by_user_id=?');
+        $refCountStmt->execute([(int)$u['id']]);
+        $refCount = (int)$refCountStmt->fetchColumn();
+        $balance = BalanceService::balance((int)$u['id']);
+        view('user/dashboard', compact('sub','links','subUrl','refLink','refCount','balance')); return;
+    }
+
+    if ($path === '/buy') {
+        require_login();
+        $plans = PlanService::activePlans();
+        view('user/buy_plans', compact('plans'));
+        return;
+    }
+    if ($path === '/order/create' && $method === 'POST') {
+        $u = require_login(); check_csrf();
+        $days = (int)($_POST['days'] ?? 30); $prices = app_config('prices');
+        if (!isset($prices[$days])) throw new RuntimeException('Неверный тариф.');
+        $promoCode = strtoupper(trim((string)($_POST['promo_code'] ?? '')));
+        $promo = $promoCode !== '' ? find_valid_promo($promoCode, (int)$u['id']) : null;
+        if ($promoCode !== '' && !$promo) {
+            flash('Промокод не найден, истёк или уже использован.', 'warning');
+            redirect('/buy');
+        }
+        $calc = apply_promo_to_price((int)$prices[$days], $days, $promo);
+        $finalDays = $days + (int)$calc['extra_days'];
+        $finalAmount = (int)$calc['amount'];
+        $pending = db()->prepare("SELECT id FROM orders WHERE user_id=? AND status='pending' ORDER BY created_at DESC LIMIT 1");
+        $pending->execute([$u['id']]);
+        $existingOrderId = $pending->fetchColumn();
+        if ($existingOrderId) {
+            flash('У вас уже есть заявка на оплату. Загрузите чек или дождитесь проверки администратора.', 'warning');
+            redirect('/order?id=' . $existingOrderId);
+        }
+        db()->prepare('INSERT INTO orders (user_id,days,amount,status,promo_code,original_amount,discount_amount) VALUES (?,?,?,?,?,?,?)')
+            ->execute([$u['id'],$finalDays,$finalAmount,'pending',$calc['promo_code'],$prices[$days],$calc['discount']]);
+        $orderId = (int)db()->lastInsertId();
+        if ($promo) mark_promo_used($promo, (int)$u['id'], $orderId);
+        redirect('/order?id=' . $orderId);
+    }
+    if ($path === '/order') {
+        $u = require_login(); $id=(int)($_GET['id'] ?? 0);
+        $stmt=db()->prepare('SELECT * FROM orders WHERE id=? AND user_id=?'); $stmt->execute([$id,$u['id']]);
+        $order=$stmt->fetch(); if(!$order) redirect('/dashboard');
+        if($method==='POST'){
+            check_csrf();
+            if(empty($_FILES['receipt']['tmp_name'])) throw new RuntimeException('Файл не загружен.');
+            $ext = pathinfo($_FILES['receipt']['name'], PATHINFO_EXTENSION) ?: 'dat';
+            $name = 'receipt_' . $order['id'] . '_' . time() . '.' . preg_replace('/[^a-zA-Z0-9]/','',$ext);
+            $rel = 'uploads/receipts/' . $name;
+            $dest = __DIR__ . '/' . $rel;
+            move_uploaded_file($_FILES['receipt']['tmp_name'], $dest);
+            db()->prepare("UPDATE orders SET receipt_path=?, status='pending' WHERE id=?")->execute([$rel,$order['id']]);
+            admin_log('receipt_uploaded', (int)$u['id'], ['order_id'=>(int)$order['id']]);
+            flash('✅ Заявка отправлена. Чек загружен, ожидайте подтверждения администратора.', 'success'); redirect('/dashboard');
+        }
+        $payment=app_config('payment'); view('user/order', compact('order','payment')); return;
+    }
+
+    if ($path === '/admin') {
+        require_admin();
+        $stats = admin_dashboard_stats();
+        $pending = $stats['pending_orders'];
+        $users = $stats['users'];
+        view('admin/index', compact('pending','users','stats')); return;
+    }
+    if ($path === '/admin/status') {
+        require_admin();
+        $statuses = check_all_xray_statuses();
+        view('admin/status', compact('statuses')); return;
+    }
+    if ($path === '/admin/import') {
+        require_admin();
+        view('admin/import'); return;
+    }
+
+    if ($path === '/admin/orders') {
+        require_admin();
+        $orders=db()->query('SELECT o.*,u.email FROM orders o JOIN users u ON u.id=o.user_id ORDER BY o.created_at DESC LIMIT 100')->fetchAll();
+        view('admin/orders', compact('orders')); return;
+    }
+    if ($path === '/admin/orders/reject' && $method==='POST') {
+        require_admin(); check_csrf();
+        db()->prepare("UPDATE orders SET status='rejected' WHERE id=?")->execute([(int)$_POST['id']]);
+        admin_log('order_rejected', null, ['order_id'=>(int)$_POST['id']]);
+        flash('Заявка отклонена.'); redirect('/admin/orders');
+    }
+    if ($path === '/admin/orders/approve' && $method==='POST') {
+        require_admin(); check_csrf(); $id=(int)$_POST['id'];
+        $stmt=db()->prepare('SELECT o.*,u.email FROM orders o JOIN users u ON u.id=o.user_id WHERE o.id=?'); $stmt->execute([$id]);
+        $order=$stmt->fetch(); if(!$order) redirect('/admin/orders');
+        $now = new DateTimeImmutable('now', new DateTimeZone('UTC'));
+        $stmt=db()->prepare("SELECT * FROM subscriptions WHERE user_id=? AND server_id='global' ORDER BY expires_at DESC LIMIT 1"); $stmt->execute([$order['user_id']]);
+        $sub=$stmt->fetch();
+        if($sub){
+            $base = strtotime($sub['expires_at']) > time() ? new DateTimeImmutable($sub['expires_at'], new DateTimeZone('UTC')) : $now;
+            $expires = $base->modify('+' . (int)$order['days'] . ' days')->format('Y-m-d H:i:s');
+            $uuid = $sub['uuid'];
+            db()->prepare('UPDATE subscriptions SET active=1, expires_at=?, reminded_3=0, reminded_1=0 WHERE id=?')->execute([$expires,$sub['id']]);
+            $sub['expires_at'] = $expires; ensure_subscription_token($sub);
+        } else {
+            $uuid = uuid_v4();
+            $expires = $now->modify('+' . (int)$order['days'] . ' days')->format('Y-m-d H:i:s');
+            db()->prepare("INSERT INTO subscriptions (user_id,server_id,uuid,active,expires_at,sub_token) VALUES (?,'global',?,1,?,?)")->execute([$order['user_id'],$uuid,$expires,random_token(32)]);
+        }
+        create_job('provision_user', ['user_id'=>(int)$order['user_id'], 'uuid'=>$uuid, 'xray_email'=>'web_' . $order['user_id'], 'order_id'=>$id], 5);
+        if (setting_get('jobs_inline_after_approve', '0') === '1') {
+            run_jobs(1);
+        }
+        flash('Оплата подтверждена. Выдача/синхронизация ключа поставлена в очередь.');
+        db()->prepare("UPDATE orders SET status='paid' WHERE id=?")->execute([$id]);
+        maybe_reward_referrer((int)$order['user_id']);
+        send_magic_email((int)$order['user_id'], $order['email'], 'MagicVPN: оплата подтверждена', "Оплата подтверждена. Подписка продлена до {$expires} UTC.
+
+Откройте личный кабинет: " . base_url() . "/dashboard");
+        admin_log('order_approved', (int)$order['user_id'], ['order_id'=>$id,'days'=>(int)$order['days'],'queued'=>true]);
+        redirect('/admin/orders');
+    }
+    if ($path === '/admin/users') {
+        require_admin();
+        $rows=db()->query("SELECT u.*,s.expires_at,s.active FROM users u LEFT JOIN subscriptions s ON s.user_id=u.id AND s.server_id='global' WHERE u.role='user' ORDER BY s.expires_at DESC, u.id DESC")->fetchAll();
+        view('admin/users', compact('rows')); return;
+    }
+    if ($path === '/admin/logs') {
+        require_admin();
+        $logs = db()->query('SELECT l.*, a.email AS admin_email, u.email AS target_email FROM admin_logs l LEFT JOIN users a ON a.id=l.admin_user_id LEFT JOIN users u ON u.id=l.target_user_id ORDER BY l.created_at DESC LIMIT 200')->fetchAll();
+        view('admin/logs', compact('logs')); return;
+    }
+    if ($path === '/admin/extend') { require_admin(); view('admin/extend'); return; }
+    if ($path === '/admin/extend/one' && $method==='POST') {
+        require_admin(); check_csrf(); $days=max(1,(int)$_POST['days']); $email=strtolower(trim($_POST['email']));
+        $stmt=db()->prepare('SELECT * FROM users WHERE email=?'); $stmt->execute([$email]); $u=$stmt->fetch(); if(!$u){flash('Пользователь не найден','danger'); redirect('/admin/extend');}
+        extend_user((int)$u['id'],$days,true); admin_log('extend_one', (int)$u['id'], ['days'=>$days]); flash('Пользователь продлён.'); redirect('/admin/users');
+    }
+    if ($path === '/admin/extend/all' && $method==='POST') {
+        require_admin(); check_csrf(); $days=max(1,(int)$_POST['days']);
+        $rows=db()->query("SELECT user_id FROM subscriptions WHERE server_id='global' AND active=1 AND expires_at > UTC_TIMESTAMP()")->fetchAll();
+        foreach($rows as $r) extend_user((int)$r['user_id'],$days,false);
+        admin_log('extend_all', null, ['days'=>$days,'count'=>count($rows)]);
+        flash('Активные пользователи продлены: '.count($rows)); redirect('/admin/users');
+    }
+
+    if ($path === '/admin/promos') {
+        require_admin();
+        $promos = db()->query('SELECT * FROM promo_codes ORDER BY created_at DESC')->fetchAll();
+        view('admin/promos', compact('promos')); return;
+    }
+    if ($path === '/admin/promos/create' && $method === 'POST') {
+        require_admin(); check_csrf();
+        $code = strtoupper(trim((string)($_POST['code'] ?? '')));
+        $type = (string)($_POST['type'] ?? 'percent');
+        $value = max(1, (int)($_POST['value'] ?? 0));
+        $maxUses = trim((string)($_POST['max_uses'] ?? '')) === '' ? null : max(1, (int)$_POST['max_uses']);
+        $expiresAt = trim((string)($_POST['expires_at'] ?? '')) ?: null;
+        if ($code === '' || !in_array($type, ['percent','fixed','days'], true)) throw new RuntimeException('Проверьте промокод.');
+        db()->prepare('INSERT INTO promo_codes (code,type,value,max_uses,expires_at,active) VALUES (?,?,?,?,?,1)')->execute([$code,$type,$value,$maxUses,$expiresAt]);
+        admin_log('promo_created', null, ['code'=>$code,'type'=>$type,'value'=>$value]);
+        flash('Промокод создан.'); redirect('/admin/promos');
+    }
+    if ($path === '/admin/promos/toggle' && $method === 'POST') {
+        require_admin(); check_csrf();
+        $id = (int)$_POST['id'];
+        db()->prepare('UPDATE promo_codes SET active = IF(active=1,0,1) WHERE id=?')->execute([$id]);
+        admin_log('promo_toggled', null, ['id'=>$id]);
+        flash('Статус промокода изменён.'); redirect('/admin/promos');
+    }
+
+    if ($path === '/admin/security-settings') {
+        require_admin();
+        $settings = [
+            'registration_email_verify_enabled' => setting_get('registration_email_verify_enabled', '0'),
+            'registration_captcha_enabled' => setting_get('registration_captcha_enabled', '0'),
+            'registration_captcha_label' => setting_get('registration_captcha_label', 'Подтвердите, что вы не робот'),
+            'registration_captcha_provider' => setting_get('registration_captcha_provider', 'google'),
+            'recaptcha_site_key' => setting_get('recaptcha_site_key', ''),
+            'recaptcha_secret_key' => setting_get('recaptcha_secret_key', ''),
+        ];
+        view('admin/security_settings', compact('settings')); return;
+    }
+    if ($path === '/admin/security-settings/save' && $method === 'POST') {
+        require_admin(); check_csrf();
+        setting_set('registration_email_verify_enabled', !empty($_POST['registration_email_verify_enabled']) ? '1' : '0');
+        setting_set('registration_captcha_enabled', !empty($_POST['registration_captcha_enabled']) ? '1' : '0');
+        setting_set('registration_captcha_provider', 'google');
+        setting_set('registration_captcha_label', trim((string)($_POST['registration_captcha_label'] ?? 'Подтвердите, что вы не робот')) ?: 'Подтвердите, что вы не робот');
+        setting_set('recaptcha_site_key', trim((string)($_POST['recaptcha_site_key'] ?? '')));
+        setting_set('recaptcha_secret_key', trim((string)($_POST['recaptcha_secret_key'] ?? '')));
+        admin_log('security_settings_updated', null, [
+            'email_verify' => !empty($_POST['registration_email_verify_enabled']),
+            'captcha' => !empty($_POST['registration_captcha_enabled']),
+        ]);
+        flash('Настройки регистрации сохранены.'); redirect('/admin/security-settings');
+    }
+
+    if ($path === '/admin/email-settings') {
+        require_admin();
+        $keys = ['smtp_enabled','smtp_host','smtp_port','smtp_encryption','smtp_username','smtp_password','smtp_from_email','smtp_from_name','smtp_timeout'];
+        $settings = [];
+        foreach ($keys as $k) $settings[$k] = setting_get($k, '');
+        view('admin/email_settings', compact('settings')); return;
+    }
+    if ($path === '/admin/email-settings/save' && $method === 'POST') {
+        require_admin(); check_csrf();
+        $keys = ['smtp_enabled','smtp_host','smtp_port','smtp_encryption','smtp_username','smtp_password','smtp_from_email','smtp_from_name','smtp_timeout'];
+        foreach ($keys as $k) setting_set($k, trim((string)($_POST[$k] ?? '')));
+        admin_log('smtp_settings_saved', null, ['host'=>$_POST['smtp_host'] ?? '', 'enabled'=>$_POST['smtp_enabled'] ?? '0']);
+        flash('SMTP-настройки сохранены.'); redirect('/admin/email-settings');
+    }
+    if ($path === '/admin/email-settings/test' && $method === 'POST') {
+        require_admin(); check_csrf();
+        $email = trim((string)($_POST['test_email'] ?? ''));
+        if (!filter_var($email, FILTER_VALIDATE_EMAIL)) throw new RuntimeException('Укажите корректный email для теста.');
+        $ok = send_magic_email((int)($_SESSION['user_id'] ?? 0), $email, 'MagicVPN: тест SMTP', "Это тестовое письмо MagicVPN.\n\nЕсли вы его получили, SMTP настроен правильно.");
+        flash($ok ? 'Тестовое письмо отправлено.' : 'Не удалось отправить письмо. Подробности в Email-логах.', $ok ? 'success' : 'danger');
+        redirect('/admin/email-settings');
+    }
+
+    if ($path === '/admin/notices') {
+        require_admin();
+        $notices = db()->query("SELECT n.*, u.email AS target_email FROM user_notices n LEFT JOIN users u ON u.id=n.user_id ORDER BY n.created_at DESC LIMIT 200")->fetchAll();
+        view('admin/notices', compact('notices')); return;
+    }
+    if ($path === '/admin/notices/create' && $method === 'POST') {
+        require_admin(); check_csrf();
+        $targetType = ($_POST['target_type'] ?? 'all') === 'user' ? 'user' : 'all';
+        $userId = null;
+        if ($targetType === 'user') {
+            $email = strtolower(trim((string)($_POST['target_email'] ?? '')));
+            $stmt = db()->prepare('SELECT id FROM users WHERE email=? LIMIT 1');
+            $stmt->execute([$email]);
+            $userId = $stmt->fetchColumn();
+            if (!$userId) throw new RuntimeException('Пользователь для уведомления не найден.');
+        }
+        $title = trim((string)($_POST['title'] ?? ''));
+        $body = trim((string)($_POST['body'] ?? ''));
+        $level = in_array(($_POST['level'] ?? 'info'), ['info','warning','danger','success'], true) ? $_POST['level'] : 'info';
+        $expiresAt = trim((string)($_POST['expires_at'] ?? ''));
+        $expiresAt = $expiresAt !== '' ? str_replace('T', ' ', $expiresAt) . ':00' : null;
+        if ($title === '' || $body === '') throw new RuntimeException('Заполните заголовок и текст уведомления.');
+        db()->prepare('INSERT INTO user_notices (target_type,user_id,title,body,level,pinned,active,expires_at,created_by) VALUES (?,?,?,?,?,1,1,?,?)')
+            ->execute([$targetType,$userId,$title,$body,$level,$expiresAt,$_SESSION['user_id'] ?? null]);
+        admin_log('notice_created', $userId ? (int)$userId : null, ['target_type'=>$targetType,'title'=>$title]);
+        flash('Уведомление закреплено.'); redirect('/admin/notices');
+    }
+    if ($path === '/admin/notices/toggle' && $method === 'POST') {
+        require_admin(); check_csrf();
+        $id = (int)$_POST['id'];
+        db()->prepare('UPDATE user_notices SET active = IF(active=1,0,1) WHERE id=?')->execute([$id]);
+        admin_log('notice_toggled', null, ['id'=>$id]);
+        flash('Статус уведомления изменён.'); redirect('/admin/notices');
+    }
+    if ($path === '/admin/notices/delete' && $method === 'POST') {
+        require_admin(); check_csrf();
+        $id = (int)$_POST['id'];
+        db()->prepare('DELETE FROM user_notices WHERE id=?')->execute([$id]);
+        admin_log('notice_deleted', null, ['id'=>$id]);
+        flash('Уведомление удалено.'); redirect('/admin/notices');
+    }
+
+    if ($path === '/balance') {
+        $u = require_login();
+        $balance = BalanceService::balance((int)$u['id']);
+        $transactions = BalanceService::history((int)$u['id'], 100);
+        $topups = BalanceService::topups((int)$u['id'], 50);
+        $payment = app_config('payment');
+        view('user/balance', compact('balance','transactions','topups','payment')); return;
+    }
+    if ($path === '/balance/topup' && $method === 'POST') {
+        $u = require_login(); check_csrf();
+        $amount = (int)($_POST['amount'] ?? 0);
+        $topupId = BalanceService::createTopup((int)$u['id'], $amount);
+        flash('Заявка на пополнение создана. Загрузите чек после оплаты.', 'success');
+        redirect('/balance/topup/view?id=' . $topupId);
+    }
+    if ($path === '/balance/topup/view') {
+        $u = require_login(); $id=(int)($_GET['id'] ?? 0);
+        $stmt=db()->prepare('SELECT * FROM balance_topups WHERE id=? AND user_id=?'); $stmt->execute([$id,(int)$u['id']]);
+        $topup=$stmt->fetch(); if(!$topup) redirect('/balance');
+        if ($method === 'POST') {
+            check_csrf();
+            if(empty($_FILES['receipt']['tmp_name'])) throw new RuntimeException('Файл не загружен.');
+            $ext = pathinfo($_FILES['receipt']['name'], PATHINFO_EXTENSION) ?: 'dat';
+            $name = 'balance_' . $topup['id'] . '_' . time() . '.' . preg_replace('/[^a-zA-Z0-9]/','',$ext);
+            $rel = 'uploads/receipts/' . $name;
+            $dest = __DIR__ . '/' . $rel;
+            move_uploaded_file($_FILES['receipt']['tmp_name'], $dest);
+            BalanceService::attachReceipt((int)$topup['id'], (int)$u['id'], $rel);
+            admin_log('balance_receipt_uploaded', (int)$u['id'], ['topup_id'=>(int)$topup['id']]);
+            flash('Чек загружен. Ожидайте подтверждения администратора.', 'success');
+            redirect('/balance');
+        }
+        $payment=app_config('payment'); view('user/balance_topup', compact('topup','payment')); return;
+    }
+
+    if ($path === '/support') {
+        $u = require_login();
+        $tickets = db()->prepare('SELECT * FROM support_tickets WHERE user_id=? ORDER BY last_message_at DESC LIMIT 100');
+        $tickets->execute([(int)$u['id']]);
+        $tickets = $tickets->fetchAll();
+        view('user/support', compact('tickets')); return;
+    }
+    if ($path === '/support/create' && $method === 'POST') {
+        $u = require_login(); check_csrf();
+        $subject = trim((string)($_POST['subject'] ?? ''));
+        $body = trim((string)($_POST['body'] ?? ''));
+        if ($subject === '' || $body === '') throw new RuntimeException('Заполните тему и сообщение.');
+        db()->prepare("INSERT INTO support_tickets (user_id,subject,status,last_message_at) VALUES (?,?,'open',UTC_TIMESTAMP())")->execute([(int)$u['id'],$subject]);
+        $ticketId = (int)db()->lastInsertId();
+        db()->prepare('INSERT INTO support_messages (ticket_id,user_id,is_admin,body) VALUES (?,?,0,?)')->execute([$ticketId,(int)$u['id'],$body]);
+        admin_log('support_ticket_created', (int)$u['id'], ['ticket_id'=>$ticketId]);
+        flash('Обращение создано. Ответ появится здесь.', 'success'); redirect('/support/view?id=' . $ticketId);
+    }
+    if ($path === '/support/view') {
+        $u = require_login(); $id=(int)($_GET['id'] ?? 0);
+        $stmt=db()->prepare('SELECT * FROM support_tickets WHERE id=? AND user_id=?'); $stmt->execute([$id,(int)$u['id']]);
+        $ticket=$stmt->fetch(); if(!$ticket) redirect('/support');
+        $m=db()->prepare('SELECT * FROM support_messages WHERE ticket_id=? ORDER BY created_at ASC'); $m->execute([$id]); $messages=$m->fetchAll();
+        view('user/support_view', compact('ticket','messages')); return;
+    }
+    if ($path === '/support/reply' && $method === 'POST') {
+        $u = require_login(); check_csrf(); $id=(int)($_POST['id'] ?? 0); $body=trim((string)($_POST['body'] ?? ''));
+        $stmt=db()->prepare('SELECT * FROM support_tickets WHERE id=? AND user_id=?'); $stmt->execute([$id,(int)$u['id']]); $ticket=$stmt->fetch();
+        if(!$ticket || $body==='') redirect('/support');
+        db()->prepare('INSERT INTO support_messages (ticket_id,user_id,is_admin,body) VALUES (?,?,0,?)')->execute([$id,(int)$u['id'],$body]);
+        db()->prepare("UPDATE support_tickets SET status='open', last_message_at=UTC_TIMESTAMP() WHERE id=?")->execute([$id]);
+        redirect('/support/view?id=' . $id);
+    }
+
+    if ($path === '/admin/tickets') {
+        require_admin();
+        $tickets = db()->query('SELECT t.*,u.email FROM support_tickets t JOIN users u ON u.id=t.user_id ORDER BY t.last_message_at DESC LIMIT 200')->fetchAll();
+        view('admin/tickets', compact('tickets')); return;
+    }
+    if ($path === '/admin/tickets/view') {
+        require_admin(); $id=(int)($_GET['id'] ?? 0);
+        $stmt=db()->prepare('SELECT t.*,u.email FROM support_tickets t JOIN users u ON u.id=t.user_id WHERE t.id=?'); $stmt->execute([$id]); $ticket=$stmt->fetch(); if(!$ticket) redirect('/admin/tickets');
+        $m=db()->prepare('SELECT * FROM support_messages WHERE ticket_id=? ORDER BY created_at ASC'); $m->execute([$id]); $messages=$m->fetchAll();
+        view('admin/ticket_view', compact('ticket','messages')); return;
+    }
+    if ($path === '/admin/tickets/reply' && $method === 'POST') {
+        require_admin(); check_csrf(); $id=(int)($_POST['id'] ?? 0); $body=trim((string)($_POST['body'] ?? ''));
+        if($body==='') redirect('/admin/tickets/view?id='.$id);
+        db()->prepare('INSERT INTO support_messages (ticket_id,user_id,is_admin,body) VALUES (?,NULL,1,?)')->execute([$id,$body]);
+        db()->prepare("UPDATE support_tickets SET status='answered', last_message_at=UTC_TIMESTAMP() WHERE id=?")->execute([$id]);
+        admin_log('support_ticket_answered', null, ['ticket_id'=>$id]);
+        redirect('/admin/tickets/view?id=' . $id);
+    }
+    if ($path === '/admin/tickets/close' && $method === 'POST') {
+        require_admin(); check_csrf(); $id=(int)($_POST['id'] ?? 0);
+        db()->prepare("UPDATE support_tickets SET status='closed' WHERE id=?")->execute([$id]);
+        admin_log('support_ticket_closed', null, ['ticket_id'=>$id]);
+        redirect('/admin/tickets');
+    }
+
+    if ($path === '/admin/jobs') {
+        require_admin();
+        $jobs = db()->query('SELECT * FROM jobs ORDER BY id DESC LIMIT 200')->fetchAll();
+        $jobStats = job_stats();
+        view('admin/jobs', compact('jobs','jobStats')); return;
+    }
+    if ($path === '/admin/jobs/run' && $method === 'POST') {
+        require_admin(); check_csrf();
+        $res = run_jobs(5);
+        admin_log('jobs_run_manual', null, $res);
+        flash('Обработано задач: '.$res['processed'].', успешно: '.$res['done'].', ошибок: '.$res['failed'], $res['failed'] ? 'warning' : 'success');
+        redirect('/admin/jobs');
+    }
+    if ($path === '/admin/jobs/retry' && $method === 'POST') {
+        require_admin(); check_csrf(); $id=(int)$_POST['id'];
+        db()->prepare("UPDATE jobs SET status='pending', attempts=0, last_error=NULL, available_at=UTC_TIMESTAMP() WHERE id=?")->execute([$id]);
+        flash('Задача возвращена в очередь.'); redirect('/admin/jobs');
+    }
+    if ($path === '/admin/jobs/sync-all' && $method === 'POST') {
+        require_admin(); check_csrf();
+        $count = enqueue_sync_all_active_users();
+        admin_log('sync_all_enqueued', null, ['count'=>$count]);
+        flash('Поставлено задач синхронизации: '.$count); redirect('/admin/jobs');
+    }
+
+    if ($path === '/admin/balances') {
+        require_admin();
+        $q = trim((string)($_GET['q'] ?? ''));
+        if ($q !== '') {
+            $stmt = db()->prepare("SELECT u.id,u.email,u.name,COALESCE(b.balance,0) AS balance FROM users u LEFT JOIN user_balances b ON b.user_id=u.id WHERE u.role='user' AND (u.email LIKE ? OR u.name LIKE ?) ORDER BY u.id DESC LIMIT 200");
+            $like = '%' . $q . '%'; $stmt->execute([$like,$like]); $rows=$stmt->fetchAll();
+        } else {
+            $rows = db()->query("SELECT u.id,u.email,u.name,COALESCE(b.balance,0) AS balance FROM users u LEFT JOIN user_balances b ON b.user_id=u.id WHERE u.role='user' ORDER BY u.id DESC LIMIT 200")->fetchAll();
+        }
+        view('admin/balances', compact('rows','q')); return;
+    }
+    if ($path === '/admin/balances/adjust' && $method === 'POST') {
+        $admin = require_admin(); check_csrf();
+        $userId = (int)($_POST['user_id'] ?? 0);
+        $amount = (int)($_POST['amount'] ?? 0);
+        $comment = trim((string)($_POST['comment'] ?? ''));
+        BalanceService::adminAdjust($userId, $amount, $comment, (int)$admin['id']);
+        admin_log('balance_adjusted', $userId, ['amount'=>$amount,'comment'=>$comment]);
+        flash('Баланс пользователя изменён.', 'success'); redirect('/admin/balances');
+    }
+    if ($path === '/admin/balance-topups') {
+        require_admin();
+        $topups = BalanceService::adminTopups(200);
+        view('admin/balance_topups', compact('topups')); return;
+    }
+    if ($path === '/admin/balance-topups/approve' && $method === 'POST') {
+        $admin = require_admin(); check_csrf();
+        $id = (int)($_POST['id'] ?? 0);
+        BalanceService::approveTopup($id, (int)$admin['id']);
+        admin_log('balance_topup_approved', null, ['topup_id'=>$id]);
+        flash('Пополнение подтверждено, баланс зачислен.', 'success'); redirect('/admin/balance-topups');
+    }
+    if ($path === '/admin/balance-topups/reject' && $method === 'POST') {
+        $admin = require_admin(); check_csrf();
+        $id = (int)($_POST['id'] ?? 0);
+        BalanceService::rejectTopup($id, (int)$admin['id'], trim((string)($_POST['comment'] ?? '')));
+        admin_log('balance_topup_rejected', null, ['topup_id'=>$id]);
+        flash('Пополнение отклонено.', 'warning'); redirect('/admin/balance-topups');
+    }
+
+    if ($path === '/admin/emails') {
+        require_admin();
+        $emails = db()->query('SELECT * FROM email_logs ORDER BY created_at DESC LIMIT 200')->fetchAll();
+        view('admin/emails', compact('emails')); return;
+    }
+
+
+    if ($path === '/checkout') {
+        $u = require_login();
+        $plan = PlanService::find((int)($_GET['plan'] ?? 0));
+        if (!$plan || !(int)$plan['is_active']) { http_response_code(404); exit('Тариф не найден'); }
+        $balance = BalanceService::balance((int)$u['id']);
+        if ($method === 'POST') {
+            check_csrf();
+            $provider = (string)($_POST['provider'] ?? '');
+            if ($provider === 'balance') {
+                BalanceService::buyPlan((int)$u['id'], $plan);
+                flash('Тариф оплачен с баланса. Подписка активирована, выдача ключа поставлена в очередь.', 'success');
+                redirect('/setup?paid=1');
+            }
+            $res = PaymentService::createPayment((int)$u['id'], $plan, $provider);
+            header('Location: ' . $res['pay_url']);
+            exit;
+        }
+        $providers = PaymentService::activeProviders();
+        view('user/checkout', compact('plan', 'providers', 'balance'));
+        return;
+    }
+
+
+    if ($path === '/setup') {
+        $u = require_login();
+        $stmt = db()->prepare("SELECT * FROM subscriptions WHERE user_id=? AND server_id='global' ORDER BY expires_at DESC LIMIT 1");
+        $stmt->execute([(int)$u['id']]);
+        $sub = $stmt->fetch() ?: null;
+        $isActive = $sub && !empty($sub['active']) && strtotime((string)$sub['expires_at']) > time();
+        if (!$isActive) {
+            flash('Сначала оплатите тариф. После активации подписки здесь появится ключ и автоимпорт.', 'warning');
+            redirect('/buy');
+        }
+        $links = build_all_vless_links($sub['uuid']);
+        $token = ensure_subscription_token($sub);
+        $sub['sub_token'] = $token;
+        $subUrl = base_url() . '/sub?token=' . urlencode($token);
+        $autoImportUrl = 'v2raytun://import/' . $subUrl;
+        view('user/setup_v2raytun', compact('sub','links','subUrl','autoImportUrl'));
+        return;
+    }
+
+    if ($path === '/admin/plans') {
+        require_admin();
+        $plans = PlanService::allPlans();
+        view('admin/plans', compact('plans'));
+        return;
+    }
+
+    if ($path === '/admin/plans/edit') {
+        require_admin();
+        $id = (int)($_GET['id'] ?? 0);
+        $plan = $id ? PlanService::find($id) : null;
+        if ($method === 'POST') {
+            check_csrf();
+            PlanService::save($_POST, $id ?: null);
+            flash('Тариф сохранён.', 'success');
+            redirect('/admin/plans');
+        }
+        view('admin/plan_edit', compact('plan'));
+        return;
+    }
+
+    if ($path === '/admin/payments') {
+        require_admin();
+        $payments = db()->query("SELECT p.*, u.email FROM payments p LEFT JOIN users u ON u.id=p.user_id ORDER BY p.id DESC LIMIT 100")->fetchAll(PDO::FETCH_ASSOC);
+        view('admin/payments', compact('payments'));
+        return;
+    }
+
+    if ($path === '/admin/payment-providers') {
+        require_admin();
+        if ($method === 'POST') {
+            check_csrf();
+            PaymentService::saveProvider((string)$_POST['code'], $_POST);
+            flash('Платёжный провайдер сохранён.', 'success');
+            redirect('/admin/payment-providers');
+        }
+        $providers = PaymentService::allProviders();
+        view('admin/payment_providers', compact('providers'));
+        return;
+    }
+
+    if ($path === '/webhook/aaio') {
+        $raw = file_get_contents('php://input');
+        $data = $_POST ?: [];
+        $provider = PaymentService::provider('aaio');
+        $cfg = json_decode($provider['config_json'] ?? '{}', true) ?: [];
+        $secret = $cfg['secret_key'] ?? '';
+        $paymentId = (int)($data['order_id'] ?? 0);
+        $amount = (string)($data['amount'] ?? '');
+        $currency = (string)($data['currency'] ?? '');
+        $merchant = (string)($data['merchant_id'] ?? '');
+        $sign = (string)($data['sign'] ?? '');
+        $expected = hash('sha256', implode(':', [$merchant, $amount, $currency, $secret, $paymentId]));
+        if (!$paymentId || !hash_equals($expected, $sign)) { http_response_code(403); exit('bad sign'); }
+        PaymentService::markPaid($paymentId, $raw ?: json_encode($data, JSON_UNESCAPED_UNICODE));
+        echo 'OK';
+        return;
+    }
+
+    if ($path === '/webhook/cryptocloud') {
+        $raw = file_get_contents('php://input');
+        $data = json_decode($raw, true) ?: $_POST;
+        $paymentId = (int)($data['order_id'] ?? $data['invoice_id'] ?? 0);
+        $status = strtolower((string)($data['status'] ?? ''));
+        if (!$paymentId) { http_response_code(400); exit('no order'); }
+        if (in_array($status, ['paid', 'success', 'overpaid'], true)) {
+            PaymentService::markPaid($paymentId, $raw);
+        }
+        echo 'OK';
+        return;
+    }
+
+    http_response_code(404); view('home');
+} catch (Throwable $e) {
+    http_response_code(500);
+    flash($e->getMessage(), 'danger');
+    redirect($_SERVER['HTTP_REFERER'] ?? '/');
+}
+
+function extend_user(int $userId, int $days, bool $sync): void {
+    $stmt=db()->prepare("SELECT * FROM subscriptions WHERE user_id=? AND server_id='global' ORDER BY expires_at DESC LIMIT 1"); $stmt->execute([$userId]); $sub=$stmt->fetch();
+    $now = new DateTimeImmutable('now', new DateTimeZone('UTC'));
+    if($sub){
+        $base = strtotime($sub['expires_at']) > time() ? new DateTimeImmutable($sub['expires_at'], new DateTimeZone('UTC')) : $now;
+        $expires = $base->modify('+' . $days . ' days')->format('Y-m-d H:i:s');
+        db()->prepare('UPDATE subscriptions SET active=1, expires_at=?, reminded_3=0, reminded_1=0 WHERE id=?')->execute([$expires,$sub['id']]);
+        $uuid=$sub['uuid'];
+    } else {
+        $uuid=uuid_v4(); $expires=$now->modify('+' . $days . ' days')->format('Y-m-d H:i:s');
+        db()->prepare("INSERT INTO subscriptions (user_id,server_id,uuid,active,expires_at,sub_token) VALUES (?,'global',?,1,?,?)")->execute([$userId,$uuid,$expires,random_token(32)]);
+    }
+    if($sync) create_job('provision_user', ['user_id'=>$userId, 'uuid'=>$uuid, 'xray_email'=>'web_' . $userId], 5);
+}

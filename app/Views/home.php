@@ -1,0 +1,279 @@
+<?php
+$tgUrl = function_exists('setting_get') ? (setting_get('contact_telegram_url', 'https://t.me/magicvpn_support') ?: 'https://t.me/magicvpn_support') : 'https://t.me/magicvpn_support';
+$vkUrl = function_exists('setting_get') ? (setting_get('contact_vk_url', 'https://vk.com/magicvpn') ?: 'https://vk.com/magicvpn') : 'https://vk.com/magicvpn';
+?>
+<section class="hero home-hero-v2 live-home-hero">
+  <div class="row align-items-center g-5">
+    <div class="col-lg-7">
+      <span class="badge badge-soft rounded-pill mb-3 px-3 py-2">🇩🇪 Германия · 🇫🇷 Франция · одна подписка</span>
+      <h1 class="hero-title hero-gradient">MagicVPN — быстрый и удобный доступ к интернету каждый день.</h1>
+      <p class="lead-xl text-muted-blue mt-4 mb-0">
+        Подключение без сложных настроек: выберите тариф, оплатите, установите приложение и получите доступ в личном кабинете. Все доступные локации входят в одну подписку.
+      </p>
+
+      <div class="d-flex flex-column flex-sm-row gap-3 mt-4">
+        <a class="btn btn-magic btn-lg" href="/buy">Выбрать тариф</a>
+        <a class="btn btn-outline-magic btn-lg" href="/register">Создать аккаунт</a>
+      </div>
+
+      <div class="d-flex flex-wrap gap-2 mt-4">
+        <a class="social-chip" href="<?=e($tgUrl)?>" target="_blank" rel="noopener noreferrer" aria-label="Telegram MagicVPN">
+          <span class="social-chip-icon">✈️</span><span>Telegram</span>
+        </a>
+        <a class="social-chip" href="<?=e($vkUrl)?>" target="_blank" rel="noopener noreferrer" aria-label="VK MagicVPN">
+          <span class="social-chip-icon">VK</span><span>ВКонтакте</span>
+        </a>
+        <a class="social-chip" href="/terms"><span class="social-chip-icon">📄</span><span>Соглашение</span></a>
+      </div>
+
+      <div class="row g-3 mt-4 live-hero-stats">
+        <div class="col-6 col-md-4"><div class="stat"><h4 class="mb-1">2+</h4><span class="text-muted-blue">локации</span></div></div>
+        <div class="col-6 col-md-4"><div class="stat"><h4 class="mb-1">24/7</h4><span class="text-muted-blue">личный кабинет</span></div></div>
+        <div class="col-12 col-md-4"><div class="stat"><h4 class="mb-1">4 шага</h4><span class="text-muted-blue">до подключения</span></div></div>
+      </div>
+    </div>
+
+    <div class="col-lg-5">
+      <div class="hero-orb">
+        <div class="glass-card device-card home-device-card live-device-card">
+          <div class="d-flex justify-content-between align-items-center mb-3">
+            <div>
+              <b>MagicVPN</b>
+              <div class="small text-muted-blue">Личный кабинет пользователя</div>
+            </div>
+            <span class="status-pill">● Online</span>
+          </div>
+
+          <div class="live-connect-circle">
+            <div>
+              <span>Статус</span>
+              <strong>Готово</strong>
+              <small>к подключению</small>
+            </div>
+          </div>
+
+          <div class="row g-2 mt-4">
+            <div class="col-6"><div class="stat py-3"><b>🇩🇪 Германия</b><br><span class="text-muted-blue small">основная</span></div></div>
+            <div class="col-6"><div class="stat py-3"><b>🇫🇷 Франция</b><br><span class="text-muted-blue small">резервная</span></div></div>
+          </div>
+
+          <div class="live-mini-list mt-4">
+            <div><span>1</span><b>Выбор тарифа</b></div>
+            <div><span>2</span><b>Оплата</b></div>
+            <div><span>3</span><b>Установка приложения</b></div>
+            <div><span>4</span><b>Импорт подключения</b></div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section class="py-5" id="features">
+  <div class="text-center mb-4">
+    <span class="badge badge-soft rounded-pill mb-2">Возможности</span>
+    <h2 class="display-6 fw-bold mb-2">Всё для удобного подключения</h2>
+    <p class="text-muted-blue mb-0">Покупка, настройка, поддержка и управление подпиской собраны в одном личном кабинете.</p>
+  </div>
+
+  <div class="row g-4">
+    <div class="col-md-6 col-lg-3">
+      <div class="feature-card h-100">
+        <div class="feature-icon mb-3">🌍</div>
+        <h5>Все локации в подписке</h5>
+        <p class="text-muted-blue mb-0">Активная подписка открывает доступ ко всем доступным направлениям MagicVPN.</p>
+      </div>
+    </div>
+    <div class="col-md-6 col-lg-3">
+      <div class="feature-card h-100">
+        <div class="feature-icon mb-3">⚡</div>
+        <h5>Быстрая выдача доступа</h5>
+        <p class="text-muted-blue mb-0">После подтверждения оплаты доступ появляется в кабинете автоматически.</p>
+      </div>
+    </div>
+    <div class="col-md-6 col-lg-3">
+      <div class="feature-card h-100">
+        <div class="feature-icon mb-3">📱</div>
+        <h5>Понятная инструкция</h5>
+        <p class="text-muted-blue mb-0">После покупки сайт покажет приложение, ссылку для подключения и QR-код.</p>
+      </div>
+    </div>
+    <div class="col-md-6 col-lg-3">
+      <div class="feature-card h-100">
+        <div class="feature-icon mb-3">💬</div>
+        <h5>Поддержка</h5>
+        <p class="text-muted-blue mb-0">Можно написать через личный кабинет, Telegram или ВКонтакте.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section class="py-5" id="locations">
+  <div class="location-section live-location-section magic-card p-4 p-lg-5">
+    <div class="d-flex justify-content-between align-items-end flex-wrap gap-3 mb-4">
+      <div>
+        <span class="badge badge-soft rounded-pill mb-2">Локации</span>
+        <h2 class="display-6 fw-bold mb-2">Доступные направления</h2>
+        <p class="text-muted-blue mb-0">Выберите основную локацию для ежедневного использования или резервную, если нужен альтернативный маршрут.</p>
+      </div>
+      <a class="btn btn-outline-magic" href="/status">Статус сервиса</a>
+    </div>
+
+    <div class="row g-4">
+      <div class="col-lg-6">
+        <div class="location-premium-card live-location-card">
+          <div class="location-card-top">
+            <div class="location-flag-wrap"><img class="location-flag-img" src="/assets/img/flags/de.svg" alt="Германия" loading="lazy"></div>
+            <div class="flex-grow-1">
+              <div class="d-flex align-items-center flex-wrap gap-2 mb-1">
+                <h3 class="mb-0">Германия</h3>
+                <span class="location-badge main">Основная</span>
+              </div>
+              <div class="text-muted-blue">Рекомендуется для повседневного использования</div>
+            </div>
+            <span class="location-status-dot">Online</span>
+          </div>
+
+          <p class="location-description">
+            Хороший выбор для мессенджеров, браузера, видео, социальных сетей и стабильной ежедневной работы.
+          </p>
+
+          <div class="live-location-points">
+            <span>⚡ стабильная работа</span>
+            <span>📱 подходит для телефона</span>
+            <span>💻 подходит для компьютера</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="col-lg-6">
+        <div class="location-premium-card live-location-card">
+          <div class="location-card-top">
+            <div class="location-flag-wrap"><img class="location-flag-img" src="/assets/img/flags/fr.svg" alt="Франция" loading="lazy"></div>
+            <div class="flex-grow-1">
+              <div class="d-flex align-items-center flex-wrap gap-2 mb-1">
+                <h3 class="mb-0">Франция</h3>
+                <span class="location-badge backup">Резервная</span>
+              </div>
+              <div class="text-muted-blue">Альтернативная европейская локация</div>
+            </div>
+            <span class="location-status-dot">Online</span>
+          </div>
+
+          <p class="location-description">
+            Используйте как запасной вариант, если основной маршрут временно работает нестабильно или нужен другой европейский выход.
+          </p>
+
+          <div class="live-location-points">
+            <span>🔁 быстрый резерв</span>
+            <span>🌍 европейский маршрут</span>
+            <span>🛡️ дополнительный вариант</span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="location-help-row mt-4">
+      <div class="location-help-icon">💡</div>
+      <div>
+        <b>Как выбрать локацию?</b>
+        <span>Начните с основной локации. Если соединение стало нестабильным, переключитесь на резервную в приложении. Все доступные варианты появятся в личном кабинете после оплаты.</span>
+      </div>
+      <a href="/buy" class="btn btn-magic location-help-btn">Подключить</a>
+    </div>
+  </div>
+</section>
+
+<section class="py-5" id="plans">
+  <div class="magic-card p-4 p-lg-5">
+    <div class="row align-items-center g-4">
+      <div class="col-lg-5">
+        <span class="badge badge-soft rounded-pill mb-2">Тарифы</span>
+        <h2 class="display-6 fw-bold">Одна подписка — все доступные локации.</h2>
+        <p class="text-muted-blue mb-4">После оплаты доступ появится в личном кабинете. Там же будут ссылка для приложения, QR-код и инструкция.</p>
+        <a href="/buy" class="btn btn-magic">Посмотреть тарифы</a>
+      </div>
+      <div class="col-lg-7">
+        <div class="row g-3">
+          <div class="col-sm-6">
+            <div class="plan-card feature-card h-100">
+              <div class="badge badge-soft rounded-pill mb-2">Старт</div>
+              <h5>Короткий срок</h5>
+              <div class="plan-price">проверить</div>
+              <p class="text-muted-blue small">Подходит, чтобы оценить скорость и удобство.</p>
+              <a href="/buy" class="btn btn-outline-magic w-100">Выбрать</a>
+            </div>
+          </div>
+          <div class="col-sm-6">
+            <div class="plan-card feature-card h-100">
+              <div class="badge badge-soft rounded-pill mb-2">Популярно</div>
+              <h5>Месячный доступ</h5>
+              <div class="plan-price">на каждый день</div>
+              <p class="text-muted-blue small">Оптимальный вариант для постоянного использования.</p>
+              <a href="/buy" class="btn btn-magic w-100">Подключить</a>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section class="py-5">
+  <div class="row g-4 align-items-center">
+    <div class="col-lg-5">
+      <span class="badge badge-soft rounded-pill mb-2">Подключение</span>
+      <h2 class="display-6 fw-bold">Покупка в 4 шага</h2>
+      <p class="text-muted-blue">Сайт ведёт пользователя от выбора тарифа до подключения без лишних технических деталей.</p>
+    </div>
+    <div class="col-lg-7">
+      <div class="row g-3">
+        <div class="col-md-6"><div class="feature-card h-100"><div class="step-dot mb-3">1</div><h5>Выбор тарифа</h5><p class="text-muted-blue mb-0">Выберите подходящий срок подписки.</p></div></div>
+        <div class="col-md-6"><div class="feature-card h-100"><div class="step-dot mb-3">2</div><h5>Оплата</h5><p class="text-muted-blue mb-0">Оплатите с баланса или создайте заявку на пополнение.</p></div></div>
+        <div class="col-md-6"><div class="feature-card h-100"><div class="step-dot mb-3">3</div><h5>Установка приложения</h5><p class="text-muted-blue mb-0">После оплаты откроется инструкция со ссылками на приложение.</p></div></div>
+        <div class="col-md-6"><div class="feature-card h-100"><div class="step-dot mb-3">4</div><h5>Подключение</h5><p class="text-muted-blue mb-0">Нажмите кнопку импорта или используйте QR-код из кабинета.</p></div></div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section class="py-5" id="faq">
+  <div class="row justify-content-center">
+    <div class="col-lg-9">
+      <div class="text-center mb-4">
+        <span class="badge badge-soft rounded-pill mb-2">FAQ</span>
+        <h2 class="display-6 fw-bold">Частые вопросы</h2>
+      </div>
+      <div class="accordion magic-accordion" id="faqAcc">
+        <div class="magic-card mb-3">
+          <button class="accordion-button collapsed" data-bs-toggle="collapse" data-bs-target="#f1">Что нужно сделать после оплаты?</button>
+          <div id="f1" class="accordion-collapse collapse" data-bs-parent="#faqAcc"><div class="accordion-body text-muted-blue">Откройте страницу настройки после покупки. Там будет ссылка на приложение, QR-код и кнопка импорта подключения.</div></div>
+        </div>
+        <div class="magic-card mb-3">
+          <button class="accordion-button collapsed" data-bs-toggle="collapse" data-bs-target="#f2">Нужно ли платить отдельно за Францию?</button>
+          <div id="f2" class="accordion-collapse collapse" data-bs-parent="#faqAcc"><div class="accordion-body text-muted-blue">Нет. Активная подписка MagicVPN открывает доступ ко всем доступным локациям.</div></div>
+        </div>
+        <div class="magic-card mb-3">
+          <button class="accordion-button collapsed" data-bs-toggle="collapse" data-bs-target="#f3">Где смотреть срок подписки?</button>
+          <div id="f3" class="accordion-collapse collapse" data-bs-parent="#faqAcc"><div class="accordion-body text-muted-blue">Срок действия, доступные локации и данные подключения отображаются в личном кабинете.</div></div>
+        </div>
+        <div class="magic-card">
+          <button class="accordion-button collapsed" data-bs-toggle="collapse" data-bs-target="#f4">Можно ли вернуть деньги?</button>
+          <div id="f4" class="accordion-collapse collapse" data-bs-parent="#faqAcc"><div class="accordion-body text-muted-blue">Возврат денежных средств не осуществляется. Перед оплатой ознакомьтесь с <a href="/terms">пользовательским соглашением</a>.</div></div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section class="py-5">
+  <div class="magic-card p-4 p-lg-5 text-center">
+    <span class="badge badge-soft rounded-pill mb-3">Важно</span>
+    <h2 class="fw-bold mb-3">Перед оплатой ознакомьтесь с условиями</h2>
+    <p class="text-muted-blue mb-4">В пользовательском соглашении указаны правила использования сервиса, ответственность пользователя и условие: возврат денежных средств не осуществляется.</p>
+    <div class="d-flex flex-column flex-sm-row justify-content-center gap-3">
+      <a class="btn btn-outline-magic" href="/terms">Открыть пользовательское соглашение</a>
+      <a class="btn btn-magic" href="/buy">Выбрать тариф</a>
+    </div>
+  </div>
+</section>
